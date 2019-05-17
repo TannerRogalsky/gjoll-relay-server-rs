@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Title</title>
+</head>
+<body>
+    <script>
+        let socket = new WebSocket("ws://localhost:3012")
+
+        socket.onopen = (e) => {
+            socket.send(JSON.stringify({
+                type: "clientRegister",
+                data: {
+                    key: "ABCDEF1234",
+                },
+            }));
+            setInterval(() => socket.send(JSON.stringify({
+                type: "ping",
+            })), 1000);
+        }
+
+        socket.onmessage = (e) => {
+            console.log(e);
+        }
+    </script>
+</body>
+</html>
