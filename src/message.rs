@@ -6,12 +6,21 @@ use serde::{Serialize, Deserialize};
 pub enum Message {
     #[serde(rename = "ping")]
     Ping {},
+
     #[serde(rename = "pong")]
     Pong {},
+
     #[serde(rename = "clientRegister")]
     ClientRegister { data: RegistrationData },
+
     #[serde(rename = "appstreamRegister")]
     AppStreamRegister { data: RegistrationData },
+
+    #[serde(rename = "message")]
+    Relay {
+        scope: String,
+        data: serde_json::Value
+    },
 }
 
 pub type RelayKey = String;
