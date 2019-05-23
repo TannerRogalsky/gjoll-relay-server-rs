@@ -6,7 +6,7 @@
 </head>
 <body>
     <script>
-        let socket = new WebSocket("ws://localhost:3012")
+        let socket = new WebSocket("ws://localhost:9999")
 
         socket.onopen = (e) => {
             socket.send(JSON.stringify({

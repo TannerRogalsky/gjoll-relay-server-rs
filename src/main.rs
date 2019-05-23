@@ -3,11 +3,64 @@ extern crate serde_json;
 extern crate redis;
 use redis::Commands;
 
+use std::rc::Rc;
+use std::convert::From;
+
 mod message;
 use message::Message;
+use crate::message::Message::ClientRegister;
+
+#[derive(Debug, PartialEq)]
+enum Session {
+    NotConnected,
+    ClientRegistered { socket: Rc<ws::Sender> },
+    AppStreamRegistered { socket: Rc<ws::Sender> },
+    PendingValidation {
+        client: Rc<ws::Sender>,
+        app_stream: Rc<ws::Sender>,
+    },
+    Established {
+        client: Rc<ws::Sender>,
+        app_stream: Rc<ws::Sender>,
+    },
+    Failure(String),
+}
+
+#[derive(Debug, Clone)]
+enum SessionEvent {
+    RegisterClient { socket: Rc<ws::Sender> },
+    RegisterAppStream { socket: Rc<ws::Sender> },
+    Validate,
+    Invalidate,
+}
+
+
+impl Session {
+    fn next(self, event: SessionEvent) -> Session {
+        match (self, event) {
+            (Session::NotConnected, SessionEvent::RegisterClient { socket }) => {
+                Session::ClientRegistered { socket }
+            },
+            (Session::NotConnected, SessionEvent::RegisterAppStream { socket}) => {
+                Session::AppStreamRegistered { socket }
+            },
+            (Session::ClientRegistered { socket : client }, SessionEvent::RegisterAppStream { socket : app_stream }) => {
+                Session::PendingValidation {
+                    client: Rc::clone(&client),
+                    app_stream: Rc::clone( &app_stream),
+                }
+            }
+            (s, e) => {
+                Session::Failure(format!("Wrong state, event combination: {:#?} {:#?}", s, e)
+                    .to_string())
+            }
+        }
+    }
+}
 
 struct Server {
-    out: ws::Sender,
+    out: Rc<ws::Sender>,
+    session: Session,
 }
 
 impl ws::Handler for Server {
@@ -30,6 +83,13 @@ impl ws::Handler for Server {
                     Message::Ping {} => self.out.send(serde_json::to_string(&Message::Pong {}).unwrap()),
                     Message::ClientRegister {data} => {
                         println!("{:?}", data.key);
+                        self.session = self.session.next(SessionEvent::RegisterClient { socket: Rc::clone(&self.out)});
+                        Ok(())
+                    },
+                    Message::AppStreamRegister {data} => {
+//                        self.state = SessionState::AppStreamRegistered {
+//                            socket: Rc::clone(&self.out),
+//                        };
                         Ok(())
                     },
                     _ => self.out.close(ws::CloseCode::Unsupported),
@@ -52,7 +112,10 @@ fn main() {
     println!("{}", r);
 
     if let Err(error) = ws::listen("127.0.0.1:3012", |out| {
-        Server { out }
+        Server {
+            out: Rc::new(out),
+            session: Session::NotConnected,
+        }
     }) {
         println!("Failed to create WebSocket due to {:?}", error);
     }
