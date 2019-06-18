@@ -4,14 +4,12 @@ extern crate redis;
 use redis::Commands;
 
 use std::rc::Rc;
-use std::convert::From;
 
 mod message;
 use message::Message;
-use crate::message::Message::ClientRegister;
 
-#[derive(Debug, PartialEq)]
-enum Session {
+#[derive(Debug, PartialEq, Clone)]
+pub enum Session {
     NotConnected,
     ClientRegistered { socket: Rc<ws::Sender> },
     AppStreamRegistered { socket: Rc<ws::Sender> },
@@ -30,35 +28,40 @@ enum Session {
 enum SessionEvent {
     RegisterClient { socket: Rc<ws::Sender> },
     RegisterAppStream { socket: Rc<ws::Sender> },
-    Validate,
-    Invalidate,
+//    Validate,
+//    Invalidate,
 }
 
 
 impl Session {
-    fn next(self, event: SessionEvent) -> Session {
+    fn next(&self, event: &SessionEvent) -> Session {
         match (self, event) {
             (Session::NotConnected, SessionEvent::RegisterClient { socket }) => {
-                Session::ClientRegistered { socket }
+                Session::ClientRegistered { socket: Rc::clone(socket) }
             },
             (Session::NotConnected, SessionEvent::RegisterAppStream { socket}) => {
-                Session::AppStreamRegistered { socket }
+                Session::AppStreamRegistered { socket: Rc::clone(socket) }
             },
-            (Session::ClientRegistered { socket : client }, SessionEvent::RegisterAppStream { socket : app_stream }) => {
+            (Session::ClientRegistered { socket: client }, SessionEvent::RegisterAppStream { socket: app_stream }) => {
                 Session::PendingValidation {
-                    client: Rc::clone(&client),
-                    app_stream: Rc::clone( &app_stream),
+                    client: Rc::clone(client),
+                    app_stream: Rc::clone( app_stream),
+                }
+            },
+            (Session::AppStreamRegistered { socket: app_stream }, SessionEvent::RegisterClient { socket: client }) => {
+                Session::PendingValidation {
+                    client: Rc::clone(client),
+                    app_stream: Rc::clone( app_stream),
                 }
             }
             (s, e) => {
-                Session::Failure(format!("Wrong state, event combination: {:#?} {:#?}", s, e)
-                    .to_string())
+                Session::Failure(format!("Wrong state, event combination: {:#?} {:#?}", s, e))
             }
         }
     }
 }
 
-struct Server {
+pub struct Server {
     out: Rc<ws::Sender>,
     session: Session,
 }
@@ -74,8 +77,8 @@ impl ws::Handler for Server {
     }
 
     fn on_message(&mut self, msg: ws::Message) -> ws::Result<()> {
-        println!("Server got message '{}' from {:?}. ", msg, self.out.token());
-
+//        println!("Server got message '{}' from {:?}. ", msg, self.out.token());
+        println!("{:?}", self.session);
         let result : Result<Message, serde_json::Error> = serde_json::from_str(msg.as_text().unwrap());
         match result {
             Ok(value) => {
@@ -83,13 +86,13 @@ impl ws::Handler for Server {
                     Message::Ping {} => self.out.send(serde_json::to_string(&Message::Pong {}).unwrap()),
                     Message::ClientRegister {data} => {
                         println!("{:?}", data.key);
-                        self.session = self.session.next(SessionEvent::RegisterClient { socket: Rc::clone(&self.out)});
+                        let event = SessionEvent::RegisterClient { socket: Rc::clone(&self.out) };
+                        self.session = self.session.next(&event);
                         Ok(())
                     },
-                    Message::AppStreamRegister {data} => {
-//                        self.state = SessionState::AppStreamRegistered {
-//                            socket: Rc::clone(&self.out),
-//                        };
+                    Message::AppStreamRegister {data: _data} => {
+                        let event = SessionEvent::RegisterAppStream { socket: Rc::clone(&self.out) };
+                        self.session = self.session.next(&event);
                         Ok(())
                     },
                     _ => self.out.close(ws::CloseCode::Unsupported),
