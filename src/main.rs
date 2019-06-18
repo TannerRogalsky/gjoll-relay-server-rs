@@ -7,6 +7,9 @@ use std::rc::Rc;
 
 mod message;
 use message::Message;
+use std::collections::HashMap;
+use crate::message::RelayKey;
+use std::cell::RefCell;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Session {
@@ -64,6 +67,7 @@ impl Session {
 pub struct Server {
     out: Rc<ws::Sender>,
     session: Session,
+    sessions: Rc<RefCell<HashMap<RelayKey, u32>>>,
 }
 
 impl ws::Handler for Server {
@@ -86,11 +90,13 @@ impl ws::Handler for Server {
                     Message::Ping {} => self.out.send(serde_json::to_string(&Message::Pong {}).unwrap()),
                     Message::ClientRegister {data} => {
                         println!("{:?}", data.key);
+                        self.sessions.borrow_mut().insert(data.key, 0);
                         let event = SessionEvent::RegisterClient { socket: Rc::clone(&self.out) };
                         self.session = self.session.next(&event);
                         Ok(())
                     },
-                    Message::AppStreamRegister {data: _data} => {
+                    Message::AppStreamRegister {data} => {
+                        self.sessions.borrow_mut().insert(data.key, 1);
                         let event = SessionEvent::RegisterAppStream { socket: Rc::clone(&self.out) };
                         self.session = self.session.next(&event);
                         Ok(())
@@ -114,10 +120,13 @@ fn main() {
     let r : i32 = con.get("my_key").unwrap();
     println!("{}", r);
 
+    let sessions: Rc<RefCell<HashMap<RelayKey, u32>>> = Rc::new(RefCell::new(HashMap::new()));
+
     if let Err(error) = ws::listen("127.0.0.1:3012", |out| {
         Server {
             out: Rc::new(out),
             session: Session::NotConnected,
+            sessions: Rc::clone(&sessions),
         }
     }) {
         println!("Failed to create WebSocket due to {:?}", error);
