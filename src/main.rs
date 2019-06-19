@@ -1,7 +1,7 @@
 extern crate ws;
 extern crate serde_json;
 extern crate redis;
-use redis::Commands;
+use redis::{Commands, Connection};
 
 use std::rc::Rc;
 use std::cell::RefCell;
@@ -39,14 +39,14 @@ impl Session {
             },
             (Session::ClientRegistered { socket: client }, SessionEvent::RegisterAppStream { socket: app_stream }) => {
                 println!("pending_validation");
-                Session::PendingValidation {
+                Session::Established {
                     client: Rc::clone(client),
                     app_stream: Rc::clone(app_stream),
                 }
             },
             (Session::AppStreamRegistered { socket: app_stream }, SessionEvent::RegisterClient { socket: client }) => {
                 println!("pending_validation");
-                Session::PendingValidation {
+                Session::Established {
                     client: Rc::clone(client),
                     app_stream: Rc::clone( app_stream),
                 }
@@ -69,7 +69,8 @@ enum SessionEvent {
 pub struct Server {
     out: Rc<ws::Sender>,
     pending_sessions: Rc<RefCell<HashMap<RelayKey, ws::util::Token>>>,
-    sessions: Rc<RefCell<HashMap<ws::util::Token, Rc<RefCell<Session>>>>>
+    sessions: Rc<RefCell<HashMap<ws::util::Token, Rc<RefCell<Session>>>>>,
+    redis: Rc<Connection>,
 }
 
 impl Server {
@@ -86,8 +87,8 @@ impl Server {
 
     fn session_event(&mut self, token: &ws::util::Token, event: SessionEvent) {
         let sessions = self.sessions.borrow_mut();
-        let mut s = sessions[token].borrow_mut();
-        *s = s.next(&event);
+        let mut session = sessions[token].borrow_mut();
+        *session = session.next(&event);
     }
 }
 
@@ -132,7 +133,24 @@ impl ws::Handler for Server {
                         );
                         Ok(())
                     },
-                    _ => self.out.close(ws::CloseCode::Unsupported),
+                    _ => {
+                        let sessions = self.sessions.borrow_mut();
+                        let session = sessions[&self.out.token()].borrow_mut();
+                        match &*session {
+                            Session::NotConnected |
+                            Session::ClientRegistered { .. } |
+                            Session::AppStreamRegistered { .. } |
+                            Session::PendingValidation { .. } |
+                            Session::Failure(_) => self.out.close(ws::CloseCode::Unsupported),
+                            Session::Established { client, app_stream } => {
+                                if self.out.token() == client.token() {
+                                    app_stream.send(msg)
+                                } else {
+                                    client.send(msg)
+                                }
+                            },
+                        }
+                    },
                 }
             },
             Err(_error) => self.out.close(ws::CloseCode::Invalid),
@@ -141,12 +159,15 @@ impl ws::Handler for Server {
 
     fn on_close(&mut self, code: ws::CloseCode, reason: &str) {
         println!("WebSocket closing for ({:?}) {}", code, reason);
+        if let Some(session) = self.sessions.borrow_mut().remove(&self.out.token()) {
+            println!("removed session: {:?}", session);
+        }
     }
 }
 
 fn main() {
     let client = redis::Client::open("redis://127.0.0.1/").unwrap();
-    let con = client.get_connection().unwrap();
+    let con = Rc::new(client.get_connection().unwrap());
     let _ : () = con.set("my_key", 42).unwrap();
     let r : i32 = con.get("my_key").unwrap();
     println!("{}", r);
@@ -159,6 +180,7 @@ fn main() {
             out: Rc::new(out),
             pending_sessions: Rc::clone(&pending_sessions),
             sessions: Rc::clone(&sessions),
+            redis: Rc::clone(&con),
         }
     }) {
         println!("Failed to create WebSocket due to {:?}", error);

@@ -12,6 +12,8 @@ pub enum Message {
     ClientRegister { data: RegistrationData },
     #[serde(rename = "appstreamRegister")]
     AppStreamRegister { data: RegistrationData },
+    #[serde(rename = "message")]
+    Default { data: String },
 }
 
 pub type RelayKey = String;

@@ -18,6 +18,11 @@
             setInterval(() => socket.send(JSON.stringify({
                 type: "ping",
             })), 1000);
+
+            setTimeout(() =>socket.send(JSON.stringify({
+                type: "message",
+                data: "oh hi mark",
+            })), 5000);
         }
 
         socket.onmessage = (e) => {
