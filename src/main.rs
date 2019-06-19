@@ -83,6 +83,12 @@ impl Server {
             pending_sessions.insert(relay_key.to_string(), self.out.token());
         }
     }
+
+    fn session_event(&mut self, token: &ws::util::Token, event: SessionEvent) {
+        let sessions = self.sessions.borrow_mut();
+        let mut s = sessions[token].borrow_mut();
+        *s = s.next(&event);
+    }
 }
 
 impl ws::Handler for Server {
@@ -96,13 +102,8 @@ impl ws::Handler for Server {
     }
 
     fn on_message(&mut self, msg: ws::Message) -> ws::Result<()> {
-//        println!("Server got message '{}' from {:?}. ", msg, self.out.token());
-//        println!("{:?}", self.pending_sessions);
-
-        let mut sessions = self.sessions.borrow_mut();
-
-//        println!("{:?}", sessions);
-        {
+        { // debug
+            let mut sessions = self.sessions.borrow_mut();
             let session = sessions.entry(self.out.token())
                 .or_insert(Rc::new(RefCell::new(Session::NotConnected)));
             println!("{:?}, {:?}", Rc::strong_count(session), session);
@@ -116,29 +117,19 @@ impl ws::Handler for Server {
                 match value {
                     Message::Ping {} => self.out.send(serde_json::to_string(&Message::Pong {}).unwrap()),
                     Message::ClientRegister {data} => {
-                        let mut pending_sessions = self.pending_sessions.borrow_mut();
-                        if let Some(token) = pending_sessions.remove(&data.key) {
-                            let s = Rc::clone(&sessions[&token]);
-                            sessions.insert(self.out.token(), s);
-                        } else {
-                            pending_sessions.insert(data.key, self.out.token());
-                        }
-                        let event = SessionEvent::RegisterClient { socket: Rc::clone(&self.out) };
-                        let mut s = sessions[&self.out.token()].borrow_mut();
-                        *s = s.next(&event);
+                        self.coordinate_sessions(&data.key);
+                        self.session_event(
+                            &self.out.token(),
+                            SessionEvent::RegisterClient { socket: Rc::clone(&self.out) }
+                        );
                         Ok(())
                     },
                     Message::AppStreamRegister {data} => {
-                        let mut pending_sessions = self.pending_sessions.borrow_mut();
-                        if let Some(token) = pending_sessions.remove(&data.key) {
-                            let s = Rc::clone(&sessions[&token]);
-                            sessions.insert(self.out.token(), s);
-                        } else {
-                            pending_sessions.insert(data.key, self.out.token());
-                        }
-                        let event = SessionEvent::RegisterAppStream { socket: Rc::clone(&self.out) };
-                        let mut s = sessions[&self.out.token()].borrow_mut();
-                        *s = s.next(&event);
+                        self.coordinate_sessions(&data.key);
+                        self.session_event(
+                            &self.out.token(),
+                            SessionEvent::RegisterAppStream { socket: Rc::clone(&self.out) }
+                        );
                         Ok(())
                     },
                     _ => self.out.close(ws::CloseCode::Unsupported),
