@@ -4,12 +4,11 @@ extern crate redis;
 use redis::Commands;
 
 use std::rc::Rc;
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 mod message;
-use message::Message;
-use std::collections::HashMap;
-use crate::message::RelayKey;
-use std::cell::RefCell;
+use message::{Message, RelayKey};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Session {
@@ -27,31 +26,26 @@ pub enum Session {
     Failure(String),
 }
 
-#[derive(Debug, Clone)]
-enum SessionEvent {
-    RegisterClient { socket: Rc<ws::Sender> },
-    RegisterAppStream { socket: Rc<ws::Sender> },
-//    Validate,
-//    Invalidate,
-}
-
-
 impl Session {
     fn next(&self, event: &SessionEvent) -> Session {
         match (self, event) {
             (Session::NotConnected, SessionEvent::RegisterClient { socket }) => {
+                println!("register_client");
                 Session::ClientRegistered { socket: Rc::clone(socket) }
             },
             (Session::NotConnected, SessionEvent::RegisterAppStream { socket}) => {
+                println!("app_stream_register");
                 Session::AppStreamRegistered { socket: Rc::clone(socket) }
             },
             (Session::ClientRegistered { socket: client }, SessionEvent::RegisterAppStream { socket: app_stream }) => {
+                println!("pending_validation");
                 Session::PendingValidation {
                     client: Rc::clone(client),
-                    app_stream: Rc::clone( app_stream),
+                    app_stream: Rc::clone(app_stream),
                 }
             },
             (Session::AppStreamRegistered { socket: app_stream }, SessionEvent::RegisterClient { socket: client }) => {
+                println!("pending_validation");
                 Session::PendingValidation {
                     client: Rc::clone(client),
                     app_stream: Rc::clone( app_stream),
@@ -64,10 +58,31 @@ impl Session {
     }
 }
 
+#[derive(Debug, Clone)]
+enum SessionEvent {
+    RegisterClient { socket: Rc<ws::Sender> },
+    RegisterAppStream { socket: Rc<ws::Sender> },
+//    Validate,
+//    Invalidate,
+}
+
 pub struct Server {
     out: Rc<ws::Sender>,
-    session: Session,
-    sessions: Rc<RefCell<HashMap<RelayKey, u32>>>,
+    pending_sessions: Rc<RefCell<HashMap<RelayKey, ws::util::Token>>>,
+    sessions: Rc<RefCell<HashMap<ws::util::Token, Rc<RefCell<Session>>>>>
+}
+
+impl Server {
+    fn coordinate_sessions(&mut self, relay_key: &str) {
+        let mut sessions = self.sessions.borrow_mut();
+        let mut pending_sessions = self.pending_sessions.borrow_mut();
+        if let Some(token) = pending_sessions.remove(relay_key) {
+            let s = Rc::clone(&sessions[&token]);
+            sessions.insert(self.out.token(), s);
+        } else {
+            pending_sessions.insert(relay_key.to_string(), self.out.token());
+        }
+    }
 }
 
 impl ws::Handler for Server {
@@ -82,23 +97,48 @@ impl ws::Handler for Server {
 
     fn on_message(&mut self, msg: ws::Message) -> ws::Result<()> {
 //        println!("Server got message '{}' from {:?}. ", msg, self.out.token());
-        println!("{:?}", self.session);
+//        println!("{:?}", self.pending_sessions);
+
+        let mut sessions = self.sessions.borrow_mut();
+
+//        println!("{:?}", sessions);
+        {
+            let session = sessions.entry(self.out.token())
+                .or_insert(Rc::new(RefCell::new(Session::NotConnected)));
+            println!("{:?}, {:?}", Rc::strong_count(session), session);
+        }
+
+
         let result : Result<Message, serde_json::Error> = serde_json::from_str(msg.as_text().unwrap());
         match result {
             Ok(value) => {
+                // This should maybe be the thing that assigns new session state
                 match value {
                     Message::Ping {} => self.out.send(serde_json::to_string(&Message::Pong {}).unwrap()),
                     Message::ClientRegister {data} => {
-                        println!("{:?}", data.key);
-                        self.sessions.borrow_mut().insert(data.key, 0);
+                        let mut pending_sessions = self.pending_sessions.borrow_mut();
+                        if let Some(token) = pending_sessions.remove(&data.key) {
+                            let s = Rc::clone(&sessions[&token]);
+                            sessions.insert(self.out.token(), s);
+                        } else {
+                            pending_sessions.insert(data.key, self.out.token());
+                        }
                         let event = SessionEvent::RegisterClient { socket: Rc::clone(&self.out) };
-                        self.session = self.session.next(&event);
+                        let mut s = sessions[&self.out.token()].borrow_mut();
+                        *s = s.next(&event);
                         Ok(())
                     },
                     Message::AppStreamRegister {data} => {
-                        self.sessions.borrow_mut().insert(data.key, 1);
+                        let mut pending_sessions = self.pending_sessions.borrow_mut();
+                        if let Some(token) = pending_sessions.remove(&data.key) {
+                            let s = Rc::clone(&sessions[&token]);
+                            sessions.insert(self.out.token(), s);
+                        } else {
+                            pending_sessions.insert(data.key, self.out.token());
+                        }
                         let event = SessionEvent::RegisterAppStream { socket: Rc::clone(&self.out) };
-                        self.session = self.session.next(&event);
+                        let mut s = sessions[&self.out.token()].borrow_mut();
+                        *s = s.next(&event);
                         Ok(())
                     },
                     _ => self.out.close(ws::CloseCode::Unsupported),
@@ -120,12 +160,13 @@ fn main() {
     let r : i32 = con.get("my_key").unwrap();
     println!("{}", r);
 
-    let sessions: Rc<RefCell<HashMap<RelayKey, u32>>> = Rc::new(RefCell::new(HashMap::new()));
+    let pending_sessions: Rc<RefCell<HashMap<RelayKey, ws::util::Token>>> = Rc::new(RefCell::new(HashMap::new()));
+    let sessions: Rc<RefCell<HashMap<ws::util::Token, Rc<RefCell<Session>>>>> = Rc::new(RefCell::new(HashMap::new()));
 
     if let Err(error) = ws::listen("127.0.0.1:3012", |out| {
         Server {
             out: Rc::new(out),
-            session: Session::NotConnected,
+            pending_sessions: Rc::clone(&pending_sessions),
             sessions: Rc::clone(&sessions),
         }
     }) {
